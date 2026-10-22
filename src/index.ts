@@ -1,12 +1,21 @@
 import { readFileSync } from 'node:fs';
-import { arch, platform, release } from 'node:os';
+
+import { CliAdapter } from './adapters/cli/CliAdapter.js';
 
 /**
- * Exibe a identificação do projeto e do ambiente de execução.
- *
- * @returns {void}
+ * Represents the application package metadata.
  */
-function main(): void {
+interface PackageMetadata {
+  name: string;
+  version: string;
+}
+
+/**
+ * Reads and validates the application package metadata.
+ *
+ * @returns {PackageMetadata}
+ */
+function getPackageMetadata(): PackageMetadata {
   const metadata: unknown = JSON.parse(
     readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
   );
@@ -19,13 +28,26 @@ function main(): void {
     !('version' in metadata) ||
     typeof metadata.version !== 'string'
   ) {
-    throw new Error('package.json deve conter name e version como strings.');
+    throw new Error('package.json must contain string name and version fields.');
   }
 
-  console.log(`${metadata.name} v${metadata.version}`);
-  console.log(`Sistema operacional: ${platform()} ${release()}`);
-  console.log(`Arquitetura: ${arch()}`);
-  console.log(`Node.js: ${process.version}`);
+  return {
+    name: metadata.name,
+    version: metadata.version,
+  };
+}
+
+/**
+ * Initializes and runs the command-line application.
+ *
+ * @returns {void}
+ */
+function main(): void {
+  const { name, version } = getPackageMetadata();
+
+  const cli = new CliAdapter(name, version);
+
+  cli.run();
 }
 
 main();
