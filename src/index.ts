@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 
 import { CliAdapter } from './adapters/cli/CliAdapter.js';
+import { MeasureLatencyUseCase } from './application/use-cases/MeasureLatencyUseCase.js';
+import { WindowsIcmpAdapter } from './infrastructure/network/WindowsIcmpAdapter.js';
 
 /**
  * Represents the application package metadata.
@@ -13,7 +15,7 @@ interface PackageMetadata {
 /**
  * Reads and validates the application package metadata.
  *
- * @returns {PackageMetadata}
+ * @returns {PackageMetadata} Application package metadata.
  */
 function getPackageMetadata(): PackageMetadata {
   const metadata: unknown = JSON.parse(
@@ -40,14 +42,19 @@ function getPackageMetadata(): PackageMetadata {
 /**
  * Initializes and runs the command-line application.
  *
- * @returns {void}
+ * @returns {Promise<void>} Completion of the application.
  */
-function main(): void {
+async function main(): Promise<void> {
   const { name, version } = getPackageMetadata();
 
-  const cli = new CliAdapter(name, version);
+  const networkProbe = new WindowsIcmpAdapter();
+  const measureLatencyUseCase = new MeasureLatencyUseCase(networkProbe);
+  const cli = new CliAdapter(name, version, measureLatencyUseCase);
 
-  cli.run();
+  await cli.run(process.argv.slice(2));
 }
 
-main();
+main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
