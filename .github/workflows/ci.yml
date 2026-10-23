@@ -116,10 +116,13 @@ jobs:
       - name: Install Semgrep
         run: |
           python3 -m venv .venv-semgrep
-          .venv-semgrep/bin/python -m pip install semgrep==1.141.0
+          .venv-semgrep/bin/python -m pip install --upgrade pip
+          .venv-semgrep/bin/python -m pip install semgrep==1.182.1
+          .venv-semgrep/bin/python -m pip check
 
       - name: Run Semgrep SAST
         run: |
+          .venv-semgrep/bin/semgrep --version
           .venv-semgrep/bin/semgrep scan \
             --config auto \
             --error \
