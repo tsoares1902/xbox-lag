@@ -34,7 +34,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: TypeScript typecheck
         run: npm run typecheck
@@ -70,9 +70,12 @@ jobs:
           severity: HIGH,CRITICAL
           format: table
           output: trivy-vulnerabilities.txt
-          exit-code: '0'
+          exit-code: '1'
+        env:
+          TRIVY_INCLUDE_DEV_DEPS: 'true'
 
       - name: Scan misconfigurations
+        if: success() || failure()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
@@ -81,18 +84,18 @@ jobs:
           severity: HIGH,CRITICAL
           format: table
           output: trivy-misconfigurations.txt
-          exit-code: '0'
+          exit-code: '1'
 
       - name: Scan secrets
+        if: success() || failure()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           scanners: secret
-          severity: HIGH,CRITICAL
           format: table
           output: trivy-secrets.txt
-          exit-code: '0'
+          exit-code: '1'
 
       - name: Upload Trivy reports
         if: always()
@@ -115,17 +118,21 @@ jobs:
 
       - name: Install Semgrep
         run: |
-          python3 -m venv .venv-semgrep
-          .venv-semgrep/bin/python -m pip install --upgrade pip
-          .venv-semgrep/bin/python -m pip install semgrep==1.182.1
-          .venv-semgrep/bin/python -m pip check
+          python3 -m venv "$RUNNER_TEMP/semgrep-venv"
+          "$RUNNER_TEMP/semgrep-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/semgrep-venv/bin/python" -m pip install semgrep==1.182.1
+          "$RUNNER_TEMP/semgrep-venv/bin/python" -m pip check
 
       - name: Run Semgrep SAST
         run: |
-          .venv-semgrep/bin/semgrep --version
-          .venv-semgrep/bin/semgrep scan \
+          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" --version
+          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" scan \
             --config auto \
             --error \
+            --exclude .venv-semgrep \
+            --exclude node_modules \
+            --exclude dist \
+            --exclude coverage \
             --json \
             --output semgrep-results.json \
             .

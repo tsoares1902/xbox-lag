@@ -2,6 +2,7 @@ import { arch, platform, release } from 'node:os';
 
 import type { MeasureLatencyUseCase } from '../../application/use-cases/MeasureLatencyUseCase.js';
 import type { NetworkMetrics } from '../../domain/entities/NetworkMetrics.js';
+import { MeasurementCancelledError } from '../../application/use-cases/MeasurementCancelledError.js';
 
 /**
  * Provides the command-line interface for the application.
@@ -60,22 +61,47 @@ export class CliAdapter {
     }
 
     let count = 10;
+    let intervalMs = 1000;
 
-    if (options.length > 0) {
-      if (options.length !== 2 || options[0] !== '--count') {
+    const receivedOptions = new Set<string>();
+
+    for (let index = 0; index < options.length; index += 2) {
+      const option = options[index];
+      const value = options[index + 1];
+
+      if (
+        option === undefined ||
+        value === undefined ||
+        !['--count', '--interval'].includes(option) ||
+        receivedOptions.has(option)
+      ) {
         throw new Error('Invalid measurement arguments.');
       }
 
-      const value = options[1];
+      receivedOptions.add(option);
 
-      if (value === undefined || !/^[1-9]\d*$/.test(value)) {
-        throw new Error('Probe count must be a positive safe integer.');
+      if (!/^[1-9]\d*$/.test(value)) {
+        if (option === '--count') {
+          throw new Error('Probe count must be a positive safe integer.');
+        }
+
+        throw new Error('Probe interval must be a positive integer within the timer limit.');
       }
 
-      count = Number(value);
+      const parsedValue = Number(value);
 
-      if (!Number.isSafeInteger(count)) {
-        throw new Error('Probe count must be a positive safe integer.');
+      if (option === '--count') {
+        if (!Number.isSafeInteger(parsedValue)) {
+          throw new Error('Probe count must be a positive safe integer.');
+        }
+
+        count = parsedValue;
+      } else {
+        if (!Number.isSafeInteger(parsedValue) || parsedValue > 2147483647) {
+          throw new Error('Probe interval must be a positive integer within the timer limit.');
+        }
+
+        intervalMs = parsedValue;
       }
     }
 
@@ -83,25 +109,59 @@ export class CliAdapter {
     console.log('');
     console.log(`Target: ${host}`);
     console.log(`Probes: ${count}`);
+    console.log(`Interval: ${intervalMs} ms`);
     console.log('');
 
-    const metrics = await this.measureLatencyUseCase.execute(host, count);
+    const controller = new AbortController();
+    const interrupt = (): void => {
+      controller.abort();
+      process.exitCode = 130;
+    };
+    process.on('SIGINT', interrupt);
+    try {
+      const metrics = await this.measureLatencyUseCase.execute(host, count, {
+        onProgress: (measurement, index, total) => {
+          const result =
+            measurement.latencyMs === null
+              ? 'Timeout'
+              : `Latency: ${this.formatLatency(measurement.latencyMs)}`;
 
-    this.printMetrics(metrics);
+          console.log(`[${index}/${total}] ${result}`);
+        },
+        intervalMs,
+        signal: controller.signal,
+      });
+
+      console.log('');
+      console.log('Summary');
+      this.printMetrics(metrics);
+    } catch (error) {
+      if (!(error instanceof MeasurementCancelledError)) {
+        throw error;
+      }
+      console.log('');
+      console.log('Partial Summary');
+      console.log(`Completed: ${error.metrics.getTotalMeasurements()}/${count}`);
+      this.printMetrics(error.metrics);
+    } finally {
+      process.removeListener('SIGINT', interrupt);
+    }
   }
 
   /**
    * Displays the aggregated network metrics.
    *
    * @param {NetworkMetrics} metrics Aggregated network measurements.
-   * @returns {void}
+   * @returns {void} Completion of output.
    */
   private printMetrics(metrics: NetworkMetrics): void {
     console.log(`Average: ${this.formatLatency(metrics.getAverageLatency())}`);
     console.log(`Minimum: ${this.formatLatency(metrics.getMinimumLatency())}`);
     console.log(`Maximum: ${this.formatLatency(metrics.getMaximumLatency())}`);
     console.log(`Jitter: ${this.formatLatency(metrics.getJitter())}`);
-    console.log(`Probe loss: ${metrics.getPacketLossPercentage().toFixed(2)}%`);
+    console.log(
+      `Probe loss: ${metrics.getTotalMeasurements() === 0 ? 'N/A' : `${metrics.getPacketLossPercentage().toFixed(2)}%`}`,
+    );
   }
 
   /**
@@ -117,26 +177,27 @@ export class CliAdapter {
   /**
    * Displays the available commands.
    *
-   * @returns {void}
+   * @returns {void} Completion of output.
    */
   private printHelp(): void {
     console.log(`${this.name} v${this.version}`);
     console.log('');
     console.log('Usage:');
-    console.log('  measure <host> [--count <number>]');
+    console.log('  measure <host> [--count <number>] [--interval <milliseconds>]');
     console.log('');
     console.log('Commands:');
     console.log('  measure    Measure network latency and probe loss.');
     console.log('');
     console.log('Options:');
-    console.log('  --count    Number of probes (default: 10).');
-    console.log('  --help     Display this help message.');
+    console.log('  --count       Number of probes (default: 10).');
+    console.log('  --interval    Delay between probes in milliseconds (default: 1000).');
+    console.log('  --help        Display this help message.');
   }
 
   /**
    * Displays application and runtime environment information.
    *
-   * @returns {void}
+   * @returns {void} Completion of output.
    */
   private printEnvironment(): void {
     console.log(`${this.name} v${this.version}`);

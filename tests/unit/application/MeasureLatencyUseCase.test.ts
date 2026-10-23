@@ -1,9 +1,16 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MeasureLatencyUseCase } from '../../../src/application/use-cases/MeasureLatencyUseCase.js';
 import { NetworkMeasurement } from '../../../src/domain/value-objects/NetworkMeasurement.js';
 
 import type { NetworkProbeInterface } from '../../../src/application/interfaces/NetworkProbeInterface.js';
+import type { MeasurementProgressCallback } from '../../../src/application/use-cases/MeasureLatencyUseCase.js';
+
+vi.mock('node:timers/promises', () => ({
+  setTimeout: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe('MeasureLatencyUseCase', () => {
   const host = '1.1.1.1';
@@ -17,7 +24,7 @@ describe('MeasureLatencyUseCase', () => {
    *
    * @param {number | null} latencyMs Measured latency or null for an unanswered probe.
    * @param {string} targetHost Target hostname or IP address.
-   * @returns {NetworkMeasurement}
+   * @returns {NetworkMeasurement} Network measurement for testing.
    */
   function createMeasurement(
     latencyMs: number | null,
@@ -27,6 +34,7 @@ describe('MeasureLatencyUseCase', () => {
   }
 
   beforeEach(() => {
+    vi.mocked(delay).mockClear();
     probeMock = vi.fn<NetworkProbeInterface['probe']>();
 
     networkProbe = {
@@ -43,6 +51,60 @@ describe('MeasureLatencyUseCase', () => {
   });
 
   describe('execute', () => {
+    describe('probe interval', () => {
+      it('should wait one second between probes by default', async () => {
+        probeMock.mockResolvedValue(createMeasurement(10));
+
+        await useCase.execute(host, 3);
+
+        expect(delay).toHaveBeenCalledTimes(2);
+        expect(delay).toHaveBeenNthCalledWith(1, 1000);
+        expect(delay).toHaveBeenNthCalledWith(2, 1000);
+      });
+
+      it('should wait for the custom interval between probes', async () => {
+        const events: string[] = [];
+        probeMock.mockImplementation(async () => {
+          events.push('probe');
+          return createMeasurement(10);
+        });
+        vi.mocked(delay).mockImplementation(async () => {
+          events.push('delay');
+        });
+
+        try {
+          await useCase.execute(host, 3, undefined, 250);
+
+          expect(events).toEqual(['probe', 'delay', 'probe', 'delay', 'probe']);
+          expect(delay).toHaveBeenCalledTimes(2);
+          expect(delay).toHaveBeenNthCalledWith(1, 250);
+          expect(delay).toHaveBeenNthCalledWith(2, 250);
+        } finally {
+          vi.mocked(delay).mockResolvedValue(undefined);
+        }
+      });
+
+      it('should not wait after a single probe', async () => {
+        probeMock.mockResolvedValue(createMeasurement(10));
+
+        await useCase.execute(host, 1);
+
+        expect(delay).not.toHaveBeenCalled();
+      });
+
+      it.each([0, -1, 1.5, Number.NaN, Infinity, 2147483648])(
+        'should reject invalid probe interval %s',
+        async (intervalMs) => {
+          await expect(useCase.execute(host, 3, undefined, intervalMs)).rejects.toThrow(
+            'Probe interval must be a positive integer within the timer limit.',
+          );
+
+          expect(probeMock).not.toHaveBeenCalled();
+          expect(delay).not.toHaveBeenCalled();
+        },
+      );
+    });
+
     describe('successful probes', () => {
       it('should execute the requested number of probes', async () => {
         probeMock.mockResolvedValue(createMeasurement(10));
@@ -142,6 +204,83 @@ describe('MeasureLatencyUseCase', () => {
         const metrics = await useCase.execute(host, 3);
 
         expect(metrics.getJitter()).toBeNull();
+      });
+    });
+
+    describe('progress callback', () => {
+      it('should invoke the callback after each measurement', async () => {
+        const measurements = [createMeasurement(10), createMeasurement(20), createMeasurement(30)];
+
+        const onProgress = vi.fn<MeasurementProgressCallback>();
+
+        measurements.forEach((measurement) => {
+          probeMock.mockResolvedValueOnce(measurement);
+        });
+
+        await useCase.execute(host, 3, onProgress);
+
+        expect(onProgress).toHaveBeenCalledTimes(3);
+        expect(onProgress).toHaveBeenNthCalledWith(1, measurements[0], 1, 3);
+        expect(onProgress).toHaveBeenNthCalledWith(2, measurements[1], 2, 3);
+        expect(onProgress).toHaveBeenNthCalledWith(3, measurements[2], 3, 3);
+      });
+
+      it('should report unanswered probes to the callback', async () => {
+        const measurement = createMeasurement(null);
+        const onProgress = vi.fn<MeasurementProgressCallback>();
+
+        probeMock.mockResolvedValue(measurement);
+
+        await useCase.execute(host, 1, onProgress);
+
+        expect(onProgress).toHaveBeenCalledExactlyOnceWith(measurement, 1, 1);
+      });
+
+      it('should invoke the callback after the probe completes', async () => {
+        const events: string[] = [];
+        const onProgress = vi.fn<MeasurementProgressCallback>(() => {
+          events.push('progress');
+        });
+
+        probeMock.mockImplementation(async () => {
+          events.push('probe');
+
+          return createMeasurement(10);
+        });
+
+        await useCase.execute(host, 2, onProgress);
+
+        expect(events).toEqual(['probe', 'progress', 'probe', 'progress']);
+      });
+
+      it('should work without a progress callback', async () => {
+        probeMock.mockResolvedValue(createMeasurement(10));
+
+        const metrics = await useCase.execute(host, 2);
+
+        expect(metrics.getTotalMeasurements()).toBe(2);
+        expect(metrics.getAverageLatency()).toBe(10);
+      });
+
+      it('should not report a measurement from another host', async () => {
+        const onProgress = vi.fn<MeasurementProgressCallback>();
+
+        probeMock.mockResolvedValue(createMeasurement(10, '8.8.8.8'));
+
+        await expect(useCase.execute(host, 1, onProgress)).rejects.toThrow(
+          'Probe result host does not match the requested host.',
+        );
+
+        expect(onProgress).not.toHaveBeenCalled();
+      });
+
+      it('should not invoke the callback when validation fails', async () => {
+        const onProgress = vi.fn<MeasurementProgressCallback>();
+
+        await expect(useCase.execute('', 3, onProgress)).rejects.toThrow('Host cannot be empty.');
+
+        expect(onProgress).not.toHaveBeenCalled();
+        expect(probeMock).not.toHaveBeenCalled();
       });
     });
 

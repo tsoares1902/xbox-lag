@@ -8,7 +8,8 @@ export interface NetworkProbeInterface {
    * Performs a network probe against the specified host.
    *
    * @param {string} host Target hostname or IP address.
+   * @param {AbortSignal} signal Optional cancellation signal.
    * @returns {Promise<NetworkMeasurement>}
    */
-  probe(host: string): Promise<NetworkMeasurement>;
+  probe(host: string, signal?: AbortSignal): Promise<NetworkMeasurement>;
 }
